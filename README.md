@@ -30,6 +30,8 @@ From then on I worked on each handler 1 by 1.
 I asked it to review the logic, write the code, then after the first generation, I asked it to review and finalize the code.
 After a few handlers i would update the knowledge base with the existing code.
 
+Most of the code compiled straight away, there was only one function it had issues with. BitXOR, so I gave it documentation for the function and it overcame the error.
+
 TESTING AND FINALISING:
 
 I did not test the code when it was generated, except to make sure it compiled.
