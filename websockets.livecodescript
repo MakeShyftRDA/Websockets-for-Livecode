@@ -918,3 +918,129 @@ on __WebSocketTimeout pSocketID, pTimeoutType
    // LOG THE TIMEOUT
    put "WebSocket timeout:" && pTimeoutType && "for socket" && pSocketID after msg
 end __WebSocketTimeout
+
+
+//**************************************************************************************************************************************
+// TEST CODE
+//**************************************************************************************************************************************
+
+local sSocketID
+local sTestPort
+
+on testWebSocket
+   local tError, tTestServiceURL
+   
+   // START THE WEBSOCKET SERVER
+   websocketStart "handleWebSocketMessage", 0, "Test WebSocket Server"
+   put the result into sTestPort
+   if sTestPort is empty then
+      put "Error starting WebSocket server:" && it into tError
+      logError tError
+      exit testWebSocket
+   end if
+   
+   // CONNECT TO A WEBSOCKET TEST SERVICE (E.G., ECHO.WEBSOCKET.ORG)
+   put "wss://echo.websocket.org" into tTestServiceURL
+   
+   // ATTEMPT TO CONNECT TO THE TEST SERVICE
+   websocketConnect tTestServiceURL
+   put it into sSocketID
+   if sSocketID is empty then
+      put "Error connecting to test service:" && the result into tError
+      logError tError
+      cleanupTest
+      exit testWebSocket
+   end if
+   
+   // SEND A TEST MESSAGE
+   websocketSend sSocketID, "Hello, WebSocket!", "text"
+   if the result is not empty then
+      put "Error sending message:" && the result into tError
+      logError tError
+      cleanupTest
+      exit testWebSocket
+   end if
+   
+   // WAIT FOR RESPONSE (WITH TIMEOUT)
+   send "handleResponseTimeout" to me in 5000 milliseconds
+   wait until sWebSocketConnections[sSocketID]["lastReceivedMessage"] is not empty with messages
+   cancel "handleResponseTimeout"
+   
+   if sWebSocketConnections[sSocketID]["lastReceivedMessage"] is empty then
+      put "Timeout waiting for response" into tError
+      logError tError
+      cleanupTest
+      exit testWebSocket
+   end if
+   
+   // VERIFY THE RECEIVED MESSAGE
+   if sWebSocketConnections[sSocketID]["lastReceivedMessage"] is not "Hello, WebSocket!" then
+      put "Unexpected response:" && sWebSocketConnections[sSocketID]["lastReceivedMessage"] into tError
+      logError tError
+      cleanupTest
+      exit testWebSocket
+   end if
+   
+   // TEST SUCCESSFUL
+   logTheMessage "WebSocket test completed successfully!"
+   
+   cleanupTest
+end testWebSocket
+
+on handleWebSocketMessage pSocketID, pMessage, pType
+   // HANDLE INCOMING WEBSOCKET MESSAGES
+   switch pType
+      case 1 // TEXT MESSAGE
+         put "Received text message:" && pMessage
+         put pMessage into sWebSocketConnections[pSocketID]["lastReceivedMessage"]
+         break
+      case 2 // BINARY MESSAGE
+         put "Received binary message, length:" && the length of pMessage
+         put pMessage into sWebSocketConnections[pSocketID]["lastReceivedMessage"]
+         break
+      case "OPEN"
+         put "WebSocket connection opened"
+         break
+      case "CLOSE"
+         put "WebSocket connection closed"
+         break
+      case "ERROR"
+         put "WebSocket error:" && pMessage
+         logError pMessage
+         break
+   end switch
+end handleWebSocketMessage
+
+on handleResponseTimeout
+   put "Response timeout occurred" into sWebSocketConnections[sSocketID]["lastReceivedMessage"]
+end handleResponseTimeout
+
+on cleanupTest
+   // CLOSE THE CONNECTION
+   if sSocketID is not empty then
+      websocketClose sSocketID
+   end if
+   
+   // STOP THE WEBSOCKET SERVER
+   if sTestPort is not empty then
+      websocketStop sTestPort
+   end if
+   
+   // CLEAR VARIABLES
+   put empty into sSocketID
+   put empty into sTestPort
+end cleanupTest
+
+command logTheMessage pMessage
+   put pMessage & return after msg
+   if there is a field "Log" then
+      put pMessage & return after field "Log"
+   end if
+end logTheMessage
+
+command logError pError
+   put "ERROR:" && pError & return after msg
+   if there is a field "Log" then
+      put "ERROR:" && pError & return after field "Log"
+   end if
+end logError
