@@ -24,7 +24,7 @@ Queston 4: Double check and finalize your logic
 
 Uploaded to Knowledge base
 
-... from then on I worked on each handler 1 by 1. After a few handlers i would update the knowledge base with the existing code.
+From then on I worked on each handler 1 by 1. After a few handlers i would update the knowledge base with the existing code.
 
 I did not test the code when it was generated, except to make sure it compiled.
 I figure testing it can happen when its all there to be tested.
