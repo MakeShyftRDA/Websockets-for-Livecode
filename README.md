@@ -1,12 +1,13 @@
-Websockets RFC 6455 standard .https://datatracker.ietf.org/doc/html/rfc6455
-MIT License
-Compiled by Tom Glod (ww.makeshyft.com)
-Code written by Anthropic's Claude Opus
-Tested and Corrected by all contributors (Thank you to all)
-July 11, 2024
-https://github.com/MakeShyftRDA/Websockets-for-Livecode
+Websockets RFC 6455 standard for Livecode<br>
+https://datatracker.ietf.org/doc/html/rfc6455<br>
+MIT License<br>
+Compiled by Tom Glod (www.makeshyft.com)<br>
+Code written by Anthropic's Claude Opus<br>
+Tested and Corrected by all contributors (Thank you to all)<br>
+July 11, 2024<br>
+https://github.com/MakeShyftRDA/Websockets-for-Livecode<br>
 
-METHODOLOGY:
+METHODOLOGY:<br>
 ************
 
 Made project "Websockets for Livecode"
@@ -24,7 +25,11 @@ Queston 4: Double check and finalize your logic
 
 Uploaded to Knowledge base
 
-From then on I worked on each handler 1 by 1. After a few handlers i would update the knowledge base with the existing code.
+From then on I worked on each handler 1 by 1. 
+I asked it to review the logic, write the code, then I asked it to review and finalize the code.
+After a few handlers i would update the knowledge base with the existing code.
+
+TESTING AND FINALISING:
 
 I did not test the code when it was generated, except to make sure it compiled.
 I figure testing it can happen when its all there to be tested.
