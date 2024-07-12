@@ -2,18 +2,125 @@
 local sWebSocketServers
 local sWebSocketConnections
 
+constant kDefaultPort = 8080
+constant kDefaultServerName = "LiveCode WebSocket Server"
+
 command websocketStart pCallback, pPort, pServerName
+   local tPort, tServerName, tError
+   
    // VALIDATE INPUT PARAMETERS
+   if pCallback is empty then
+      return "Callback cannot be empty" for error
+   end if
+   
    // SET UP DEFAULT VALUES IF NOT PROVIDED
+   if pPort is empty then
+      put kDefaultPort into tPort
+   else
+      put pPort into tPort
+   end if
+   
+   if pServerName is empty then
+      put kDefaultServerName into tServerName
+   else
+      put pServerName into tServerName
+   end if
+   
    // ACCEPT CONNECTIONS ON THE SPECIFIED PORT
+   accept connections on port tPort with message "__WebSocketNewConnection"
+   put the result into tError
+   if tError is not empty then
+      if tPort is kDefaultPort then
+         // TRY WITH AN EPHEMERAL PORT
+         accept connections on port "0" with message "__WebSocketNewConnection"
+         put the result into tError
+         if tError is not empty then
+            return tError for error
+         end if
+         put it into tPort
+      else
+         return tError for error
+      end if
+   end if
+   
    // STORE SERVER INFORMATION IN SWEBSOCKETSERVERS ARRAY
-   // RETURN THE PORT NUMBER OR AN ERROR
+   put __GetCaller() into sWebSocketServers[tPort]["target"]
+   put pCallback into sWebSocketServers[tPort]["callback"]
+   put tServerName into sWebSocketServers[tPort]["servername"]
+   put "ws" into sWebSocketServers[tPort]["protocol"]
+   
+   return tPort for value
 end websocketStart
 
 command websocketSecureStart pCallback, pPort, pServerName, pCertificateFile, pKeyFile
-   // SIMILAR TO WEBSOCKETSTART, BUT SET UP TLS
-   // USE SSLACCEPT INSTEAD OF ACCEPT FOR THE CONNECTION
+   local tPort, tServerName, tError
+   
+   // VALIDATE INPUT PARAMETERS
+   if pCallback is empty then
+      return "Callback cannot be empty" for error
+   end if
+   if pCertificateFile is empty or pKeyFile is empty then
+      return "Certificate and key files must be specified" for error
+   end if
+   if there is not a file pCertificateFile then
+      return "Certificate file not found" for error
+   end if
+   if there is not a file pKeyFile then
+      return "Key file not found" for error
+   end if
+   
+   // SET UP DEFAULT VALUES IF NOT PROVIDED
+   if pPort is empty then
+      put kDefaultPort into tPort
+   else
+      put pPort into tPort
+   end if
+   
+   if pServerName is empty then
+      put kDefaultServerName into tServerName
+   else
+      put pServerName into tServerName
+   end if
+   
+   // SET UP TLS
+   set the sslCertificates to pCertificateFile & "," & pKeyFile
+   
+   // ACCEPT SECURE CONNECTIONS ON THE SPECIFIED PORT
+   set the socketTimeoutInterval to 0
+   open secure socket (":" & tPort) with message "__WebSocketNewConnection"
+   put the result into tError
+   if tError is not empty then
+      if tPort is kDefaultPort then
+         // TRY WITH AN EPHEMERAL PORT
+         open secure socket ":0" with message "__WebSocketNewConnection"
+         put the result into tError
+         if tError is not empty then
+            return tError for error
+         end if
+         put the last word of the openSockets into tPort
+      else
+         return tError for error
+      end if
+   end if
+   
+   // STORE SERVER INFORMATION IN SWEBSOCKETSERVERS ARRAY
+   put __GetCaller() into sWebSocketServers[tPort]["target"]
+   put pCallback into sWebSocketServers[tPort]["callback"]
+   put tServerName into sWebSocketServers[tPort]["servername"]
+   put "wss" into sWebSocketServers[tPort]["protocol"]
+   put pCertificateFile into sWebSocketServers[tPort]["certificateFile"]
+   put pKeyFile into sWebSocketServers[tPort]["keyFile"]
+   
+   return tPort for value
 end websocketSecureStart
+
+private function __GetCaller
+   get item 1 to -3 of line -3 of the executionContexts
+   if there is not an it then
+      delete item -1 of it
+   end if
+   return it
+end __GetCaller
 
 command websocketStop pPorts
    // IF PPORTS IS EMPTY, STOP ALL SERVERS
