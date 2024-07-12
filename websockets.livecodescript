@@ -1,3 +1,4 @@
+﻿script "websockets.livecodescript"
 local sWebSocketServers
 local sWebSocketConnections
 
