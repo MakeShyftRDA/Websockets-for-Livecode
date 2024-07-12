@@ -1,10 +1,10 @@
- Websockets RFC 6455 standard .https://datatracker.ietf.org/doc/html/rfc6455
- MIT License
- Compiled by Tom Glod (ww.makeshyft.com)
- Code written by Anthropic's Claude Opus
- Tested and Corrected by all contributors (Thank you to all)
- July 11, 2024
- https://github.com/MakeShyftRDA/Websockets-for-Livecode
+Websockets RFC 6455 standard .https://datatracker.ietf.org/doc/html/rfc6455
+MIT License
+Compiled by Tom Glod (ww.makeshyft.com)
+Code written by Anthropic's Claude Opus
+Tested and Corrected by all contributors (Thank you to all)
+July 11, 2024
+https://github.com/MakeShyftRDA/Websockets-for-Livecode
 
 METHODOLOGY:
 ************
