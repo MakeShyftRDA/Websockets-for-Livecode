@@ -443,70 +443,435 @@ command websocketClose pSocketID, pStatusCode, pReason
 end websocketClose
 
 command websocketPing pSocketID, pData
+   local tPingFrame, tError, tTimeoutTime
+   
+   // VALIDATE SOCKET CONNECTION
+   if pSocketID is empty or sWebSocketConnections[pSocketID] is empty then
+      put "Invalid socket ID" into tError
+      return tError for error
+   end if
+   if sWebSocketConnections[pSocketID]["status"] is not "OPEN" then
+      put "WebSocket connection is not open" into tError
+      return tError for error
+   end if
+   
    // CREATE A PING FRAME WITH OPTIONAL DATA
+   put __WebSocketCreateFrame(pData, 9, false) into tPingFrame
+   if tPingFrame is empty then
+      put "Failed to create WebSocket ping frame" into tError
+      return tError for error
+   end if
+   
    // SEND THE PING FRAME
+   write tPingFrame to socket pSocketID with message "__WebSocketPingSent"
+   put the result into tError
+   if tError is not empty then
+      return "Failed to send WebSocket ping frame:" && tError for error
+   end if
+   
    // SET UP A TIMER TO WAIT FOR PONG RESPONSE
+   put the milliseconds + 30000 into tTimeoutTime // 30 SECONDS TIMEOUT
+   put tTimeoutTime into sWebSocketConnections[pSocketID]["pingTimeout"]
+   
+   // START THE TIMER
+   send "__WebSocketPingTimeout" to me in 30000 milliseconds with pSocketID
+   
+   // STORE THE PING DATA FOR VERIFICATION
+   put pData into sWebSocketConnections[pSocketID]["lastPingData"]
+   put the milliseconds into sWebSocketConnections[pSocketID]["lastPingTime"]
+   
+   return empty
 end websocketPing
 
+on __WebSocketPingSent pSocketID
+   // UPDATE THE LAST ACTIVITY TIMESTAMP
+   put the milliseconds into sWebSocketConnections[pSocketID]["lastActivity"]
+end __WebSocketPingSent
+
+on __WebSocketPingTimeout pSocketID
+   if sWebSocketConnections[pSocketID] is not empty and \
+         sWebSocketConnections[pSocketID]["pingTimeout"] is not empty and \
+         the milliseconds > sWebSocketConnections[pSocketID]["pingTimeout"] then
+      // PING TIMEOUT OCCURRED
+      __WebSocketCloseConnection pSocketID, 1002, "Ping timeout"
+   end if
+end __WebSocketPingTimeout
+
 on __WebSocketHandlePong pSocketID, pData
-   // PROCESS THE RECEIVED PONG FRAME
+   local tPort, tCallback, tTarget, tError
+   
+   // CHECK IF THE CONNECTION EXISTS
+   if sWebSocketConnections[pSocketID] is empty then
+      put "Invalid socket ID or connection closed" into tError
+      exit __WebSocketHandlePong
+   end if
+   
+   // GET THE PORT AND CALLBACK INFORMATION
+   put sWebSocketConnections[pSocketID]["port"] into tPort
+   if sWebSocketServers[tPort] is empty then
+      put "Server information not found" into tError
+      exit __WebSocketHandlePong
+   end if
+   put sWebSocketServers[tPort]["callback"] into tCallback
+   put sWebSocketServers[tPort]["target"] into tTarget
+   
    // CLEAR THE PING TIMER
-   // UPDATE CONNECTION STATUS IF NECESSARY
+   if sWebSocketConnections[pSocketID]["pingTimer"] is not empty then
+      cancel sWebSocketConnections[pSocketID]["pingTimer"]
+      put empty into sWebSocketConnections[pSocketID]["pingTimer"]
+   end if
+   
+   // UPDATE LAST ACTIVITY TIMESTAMP
+   put the milliseconds into sWebSocketConnections[pSocketID]["lastActivity"]
+   
+   // UPDATE CONNECTION STATUS
+   put "OPEN" into sWebSocketConnections[pSocketID]["status"]
+   
+   // NOTIFY THE APPLICATION OF THE PONG
+   try
+      dispatch tCallback to tTarget with pSocketID, "PONG", pData
+   catch tError
+      // LOG THE ERROR BUT CONTINUE PROCESSING
+      put "Error dispatching PONG callback:" && tError after msg
+   end try
+   
+   // SCHEDULE THE NEXT PING
+   send "__WebSocketSendPing" to me in 30000 milliseconds with pSocketID
+   put the result into sWebSocketConnections[pSocketID]["pingTimer"]
+   
+   // LOG ANY ERRORS
+   if tError is not empty then
+      put "WebSocket Pong Handler Error:" && tError after msg
+   end if
 end __WebSocketHandlePong
 
 private command __WebSocketCloseConnection pSocketID, pStatusCode, pReason
+   local tCloseFrame, tError, tPort
+   
+   // VALIDATE INPUTS
+   if pSocketID is empty or sWebSocketConnections[pSocketID] is empty then
+      exit __WebSocketCloseConnection
+   end if
+   
    // SEND CLOSE FRAME IF NOT ALREADY SENT
+   if sWebSocketConnections[pSocketID]["status"] is not among the items of "CLOSING,CLOSED" then
+      // ENSURE STATUS CODE IS VALID
+      if pStatusCode is empty then 
+         put 1000 into pStatusCode
+      end if
+      if pReason is empty then
+         put "Normal Closure" into pReason
+      end if
+      
+      put __WebSocketCreateFrame(numToChar(pStatusCode div 256) & numToChar(pStatusCode mod 256) & pReason, 8, true) into tCloseFrame
+      write tCloseFrame to socket pSocketID
+      put the result into tError
+      if tError is empty then
+         put "CLOSING" into sWebSocketConnections[pSocketID]["status"]
+      else
+         // LOG ERROR IF UNABLE TO SEND CLOSE FRAME
+         put "Error sending close frame:" && tError into msg
+      end if
+   end if
+   
    // CLOSE THE SOCKET
+   if the socket of pSocketID is not empty then
+      close socket pSocketID
+      put the result into tError
+      if tError is not empty then
+         // LOG ERROR IF UNABLE TO CLOSE SOCKET
+         put "Error closing socket:" && tError into msg
+      end if
+   end if
+   
    // REMOVE CONNECTION DATA FROM SWEBSOCKETCONNECTIONS
+   put sWebSocketConnections[pSocketID]["port"] into tPort
+   delete variable sWebSocketConnections[pSocketID]
+   
    // NOTIFY THE APPLICATION OF THE CLOSED CONNECTION
+   if there is a sWebSocketServers[tPort]["target"] and there is a sWebSocketServers[tPort]["callback"] then
+      try
+         dispatch sWebSocketServers[tPort]["callback"] to sWebSocketServers[tPort]["target"] with pSocketID, "CLOSED", pStatusCode, pReason
+      catch tError
+         put "Error dispatching close notification:" && tError into msg
+      end try
+   end if
 end __WebSocketCloseConnection
 
 private function __WebSocketParseFrame pData
-   // IMPLEMENT FRAME PARSING ACCORDING TO RFC 6455 SECTION 5.2
-   // RETURN AN ARRAY WITH FRAME INFORMATION (FIN, OPCODE, MASK, PAYLOAD, ETC.)
+   local tFrame, tByte1, tByte2, tMaskingKey, tPayloadLength, tPayload
+   local tHeaderLength, i
+   
+   // ENSURE WE HAVE AT LEAST 2 BYTES FOR THE FRAME HEADER
+   if the length of pData < 2 then
+      return empty
+   end if
+   
+   // PARSE THE FIRST TWO BYTES
+   put charToNum(char 1 of pData) into tByte1
+   put charToNum(char 2 of pData) into tByte2
+   
+   // EXTRACT FRAME INFORMATION FROM THE FIRST BYTE
+   put (tByte1 bitAnd 128) is 128 into tFrame["FIN"]
+   put (tByte1 bitAnd 64) is 64 into tFrame["RSV1"]
+   put (tByte1 bitAnd 32) is 32 into tFrame["RSV2"]
+   put (tByte1 bitAnd 16) is 16 into tFrame["RSV3"]
+   put tByte1 bitAnd 15 into tFrame["opcode"]
+   
+   // EXTRACT MASK AND PAYLOAD LENGTH FROM THE SECOND BYTE
+   put (tByte2 bitAnd 128) is 128 into tFrame["mask"]
+   put tByte2 bitAnd 127 into tPayloadLength
+   
+   // DETERMINE THE ACTUAL PAYLOAD LENGTH AND HEADER LENGTH
+   put 2 into tHeaderLength
+   if tPayloadLength is 126 then
+      if the length of pData < 4 then return empty
+      put binaryDecode("H", char 3 to 4 of pData, "tPayloadLength") into tPayloadLength
+      add 2 to tHeaderLength
+   else if tPayloadLength is 127 then
+      if the length of pData < 10 then return empty
+      put binaryDecode("Q", char 3 to 10 of pData, "tPayloadLength") into tPayloadLength
+      add 8 to tHeaderLength
+   end if
+   
+   // EXTRACT MASKING KEY IF PRESENT
+   if tFrame["mask"] then
+      add 4 to tHeaderLength
+      if the length of pData < tHeaderLength then return empty
+      put char (tHeaderLength - 3) to tHeaderLength of pData into tMaskingKey
+   end if
+   
+   put tHeaderLength into tFrame["headerLength"]
+   
+   // ENSURE WE HAVE THE ENTIRE FRAME
+   if the length of pData < (tHeaderLength + tPayloadLength) then
+      return empty
+   end if
+   
+   // EXTRACT THE PAYLOAD
+   put char (tHeaderLength + 1) to (tHeaderLength + tPayloadLength) of pData into tPayload
+   
+   // UNMASK THE PAYLOAD IF NECESSARY
+   if tFrame["mask"] then
+      put __WebSocketMaskUnmaskData(tPayload, tMaskingKey) into tFrame["payload"]
+   else
+      put tPayload into tFrame["payload"]
+   end if
+   
+   // SET THE TOTAL FRAME LENGTH
+   put tHeaderLength + tPayloadLength into tFrame["length"]
+   
+   // ADD PAYLOAD LENGTH TO THE FRAME INFO
+   put tPayloadLength into tFrame["payloadLength"]
+   
+   return tFrame
 end __WebSocketParseFrame
 
 private function __WebSocketCreateFrame pPayload, pOpcode, pMask
-   // IMPLEMENT FRAME CREATION ACCORDING TO RFC 6455 SECTION 5.2
-   // RETURN THE BINARY FRAME DATA
+   local tFrame, tPayloadLength, tMaskingKey, tMaskedPayload, tError
+   
+   // VALIDATE INPUTS
+   if pPayload is empty then put empty into pPayload
+   if pOpcode is not among the items of "0,1,2,8,9,10" then
+      put "Invalid opcode" into tError
+      return tError for error
+   end if
+   
+   // CREATE THE FIRST BYTE OF THE FRAME
+   put numToByte(binaryEncode("b", "1") & binaryEncode("b", "000") & binaryEncode("b", baseConvert(pOpcode, 10, 2))) into tFrame // SET FIN BIT AND OPCODE
+   
+   // DETERMINE PAYLOAD LENGTH AND ADD LENGTH BYTES
+   put length(pPayload) into tPayloadLength
+   if tPayloadLength < 126 then
+      put numToByte(tPayloadLength) after tFrame
+   else if tPayloadLength < 65536 then
+      put numToByte(126) after tFrame
+      put binaryEncode("n", tPayloadLength) after tFrame
+   else
+      put numToByte(127) after tFrame
+      put binaryEncode("N", tPayloadLength) after tFrame
+   end if
+   
+   // ADD MASKING KEY IF REQUIRED
+   if pMask then
+      put binaryEncode("b", "1") after byte 2 of tFrame // SET MASK BIT
+      put __WebSocketGenerateKey() into tMaskingKey
+      if tMaskingKey is empty then
+         put "Failed to generate masking key" into tError
+         return tError for error
+      end if
+      put tMaskingKey after tFrame
+      put __WebSocketMaskUnmaskData(pPayload, tMaskingKey) into tMaskedPayload
+   else
+      put pPayload into tMaskedPayload
+   end if
+   
+   // ADD PAYLOAD DATA
+   put tMaskedPayload after tFrame
+   
+   return tFrame
 end __WebSocketCreateFrame
 
 private function __WebSocketMaskUnmaskData pData, pMaskingKey
-   // XOR THE DATA WITH THE MASKING KEY AS PER RFC 6455 SECTION 5.3
-   // RETURN THE MASKED/UNMASKED DATA
+   local tMaskedData, tDataLength, tKeyLength, tKeyIndex, tChar, tKeyChar
+   
+   // INITIALIZE VARIABLES
+   put empty into tMaskedData
+   put the length of pData into tDataLength
+   put the length of pMaskingKey into tKeyLength
+   
+   // ENSURE THE MASKING KEY IS 4 BYTES
+   if tKeyLength is not 4 then
+      return "Error: Invalid masking key length" for error
+   end if
+   
+   // PROCESS EACH BYTE OF THE DATA
+   repeat with i = 1 to tDataLength
+      put (i - 1) mod 4 + 1 into tKeyIndex
+      put charToNum(char i of pData) into tChar
+      put charToNum(char tKeyIndex of pMaskingKey) into tKeyChar
+      
+      // PERFORM XOR OPERATION AND APPEND TO RESULT
+      put numToChar(tChar bitXor tKeyChar) after tMaskedData
+   end repeat
+   
+   return tMaskedData
 end __WebSocketMaskUnmaskData
 
-private function __WebSocketGenerateKey
-   // GENERATE A RANDOM 16-BYTE VALUE
-   // ENCODE IT IN BASE64
-   // RETURN THE ENCODED KEY
-end __WebSocketGenerateKey
+
+constant kWebSocketGUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 private function __WebSocketComputeAccept pKey
+   local tConcatenatedKey, tSha1Hash, tBase64EncodedHash
+   
    // CONCATENATE PKEY WITH THE WEBSOCKET GUID
+   put pKey & kWebSocketGUID into tConcatenatedKey
+   
    // COMPUTE THE SHA-1 HASH
+   put __Sha1(tConcatenatedKey) into tSha1Hash
+   
    // ENCODE THE HASH IN BASE64
+   put __Base64Encode(tSha1Hash) into tBase64EncodedHash
+   
    // RETURN THE COMPUTED ACCEPT VALUE
+   return tBase64EncodedHash
 end __WebSocketComputeAccept
 
+private function __WebSocketGenerateKey
+   local tRandomBytes, tEncodedKey
+   
+   // GENERATE A RANDOM 16-BYTE VALUE
+   put urandom(16) into tRandomBytes
+   
+   // ENCODE IT IN BASE64
+   put base64Encode(tRandomBytes) into tEncodedKey
+   
+   // RETURN THE ENCODED KEY
+   return tEncodedKey
+end __WebSocketGenerateKey
+
 private function __Base64Encode pData
-   // IMPLEMENT BASE64 ENCODING
+   local tEncodedData
+   
+   // USE LIVECODE'S BUILT-IN BASE64ENCODE FUNCTION
+   put base64Encode(pData) into tEncodedData
+   
+   return tEncodedData
 end __Base64Encode
 
 private function __Base64Decode pData
-   // IMPLEMENT BASE64 DECODING
+   local tDecodedData
+   
+   // USE LIVECODE'S BUILT-IN BASE64DECODE FUNCTION
+   put base64Decode(pData) into tDecodedData
+   
+   return tDecodedData
 end __Base64Decode
 
 private function __Sha1 pData
-   // IMPLEMENT SHA-1 HASHING
+   local tHashedData
+   
+   // USE LIVECODE'S BUILT-IN SHA1DIGEST FUNCTION
+   put sha1Digest(pData) into tHashedData
+   
+   return tHashedData
 end __Sha1
 
 on __WebSocketDataReceived pSocketID, pMessage, pType
-   // DISPATCH THE RECEIVED MESSAGE TO THE APPLICATION
+   local tPort, tCallback, tTarget, tError
+   
+   // VALIDATE INPUT PARAMETERS
+   if pSocketID is empty then
+      put "Invalid socket ID" into tError
+      return tError for error
+   end if
+   
+   // CHECK IF THE CONNECTION EXISTS
+   if sWebSocketConnections[pSocketID] is empty then
+      put "WebSocket connection not found for socket" && pSocketID into tError
+      return tError for error
+   end if
+   
+   // GET THE PORT FOR THIS CONNECTION
+   put sWebSocketConnections[pSocketID]["port"] into tPort
+   
+   // ENSURE THE SERVER INFO EXISTS
+   if sWebSocketServers[tPort] is empty then
+      put "Server information not found for port" && tPort into tError
+      return tError for error
+   end if
+   
+   // GET THE CALLBACK AND TARGET FOR THIS SERVER
+   put sWebSocketServers[tPort]["callback"] into tCallback
+   put sWebSocketServers[tPort]["target"] into tTarget
+   
+   // ENSURE THE CALLBACK AND TARGET ARE VALID
+   if tCallback is empty or tTarget is empty then
+      put "Invalid callback or target for port" && tPort into tError
+      return tError for error
+   end if
+   
+   // DISPATCH THE MESSAGE TO THE APPLICATION
+   try
+      dispatch tCallback to tTarget with pSocketID, pMessage, pType
+   catch tError
+      // LOG THE ERROR BUT CONTINUE PROCESSING
+      put "Error dispatching WebSocket data:" && tError & return after msg
+   end try
+   
+   // UPDATE THE LAST ACTIVITY TIMESTAMP
+   put the milliseconds into sWebSocketConnections[pSocketID]["lastActivity"]
+   
+   // RESET THE READ TIMEOUT
+   __SetupTimeouts pSocketID
 end __WebSocketDataReceived
 
 on __WebSocketConnectionClosed pSocketID, pStatusCode, pReason
+   local tPort, tCallback, tTarget, tError
+   
+   // GET THE PORT ASSOCIATED WITH THIS CONNECTION
+   put sWebSocketConnections[pSocketID]["port"] into tPort
+   
+   // CHECK IF THE SERVER INFO EXISTS FOR THIS PORT
+   if sWebSocketServers[tPort] is empty then
+      put "Server information not found for port" && tPort into tError
+      put tError after msg
+      exit __WebSocketConnectionClosed
+   end if
+   
+   // GET THE CALLBACK AND TARGET FROM THE SERVER INFO
+   put sWebSocketServers[tPort]["callback"] into tCallback
+   put sWebSocketServers[tPort]["target"] into tTarget
+   
    // NOTIFY THE APPLICATION OF THE CLOSED CONNECTION
+   try
+      dispatch tCallback to tTarget with pSocketID, "CLOSED", pStatusCode, pReason
+   catch tError
+      put "Error notifying application of closed connection:" && tError after msg
+   end try
+   
+   // REMOVE THE CONNECTION DATA FROM SWEBSOCKETCONNECTIONS
+   delete variable sWebSocketConnections[pSocketID]
 end __WebSocketConnectionClosed
 
 private command __SetupTimeouts pSocketID
