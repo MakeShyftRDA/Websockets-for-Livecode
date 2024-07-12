@@ -875,11 +875,46 @@ on __WebSocketConnectionClosed pSocketID, pStatusCode, pReason
 end __WebSocketConnectionClosed
 
 private command __SetupTimeouts pSocketID
-   // SET READ TIMEOUT
-   // SET WRITE TIMEOUT
+   local tPingInterval
+   
+   // SET GLOBAL SOCKET TIMEOUT
+   set the socketTimeoutInterval to 30000 // 30 SECONDS FOR ALL SOCKET OPERATIONS
+   
    // SET PING INTERVAL
+   put 60000 into tPingInterval // 60 SECONDS
+   
+   // STORE PING INTERVAL IN THE CONNECTION DATA
+   put tPingInterval into sWebSocketConnections[pSocketID]["pingInterval"]
+   
+   // SCHEDULE NEXT PING
+   send "__WebSocketSendPing" to me in tPingInterval milliseconds with pSocketID
+   put the result into sWebSocketConnections[pSocketID]["pingTimer"]
+   
+   // STORE LAST ACTIVITY TIMESTAMP
+   put the milliseconds into sWebSocketConnections[pSocketID]["lastActivity"]
 end __SetupTimeouts
 
 on __WebSocketTimeout pSocketID, pTimeoutType
-   // HANDLE VARIOUS TIMEOUT SCENARIOS (READ, WRITE, PING)
+   local tStatusCode, tReason
+   
+   // HANDLE VARIOUS TIMEOUT SCENARIOS
+   switch pTimeoutType
+      case "socket"
+         put 1002 into tStatusCode
+         put "Socket timeout" into tReason
+         break
+      case "ping"
+         put 1002 into tStatusCode
+         put "Ping timeout" into tReason
+         break
+      default
+         put 1002 into tStatusCode
+         put "Unknown timeout" into tReason
+   end switch
+   
+   // CLOSE THE CONNECTION
+   __WebSocketCloseConnection pSocketID, tStatusCode, tReason
+   
+   // LOG THE TIMEOUT
+   put "WebSocket timeout:" && pTimeoutType && "for socket" && pSocketID after msg
 end __WebSocketTimeout
