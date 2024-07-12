@@ -1,3 +1,4 @@
+Status: W.I.P
 Websockets RFC 6455 standard for Livecode<br>
 https://datatracker.ietf.org/doc/html/rfc6455<br>
 MIT License<br>
@@ -26,7 +27,7 @@ Queston 4: Double check and finalize your logic
 Uploaded to Knowledge base
 
 From then on I worked on each handler 1 by 1. 
-I asked it to review the logic, write the code, then I asked it to review and finalize the code.
+I asked it to review the logic, write the code, then after the first generation, I asked it to review and finalize the code.
 After a few handlers i would update the knowledge base with the existing code.
 
 TESTING AND FINALISING:
