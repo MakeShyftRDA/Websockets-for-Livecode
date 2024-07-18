@@ -8,9 +8,11 @@
 //July 11, 2024
 //https://github.com/MakeShyftRDA/Websockets-for-Livecode
 //*********************************************************************************
+
 local sWebSocketServers
 local sWebSocketConnections
 
+constant kWebSocketGUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 constant kDefaultPort = 8080
 constant kDefaultServerName = "LiveCode WebSocket Server"
 
@@ -737,9 +739,6 @@ private function __WebSocketMaskUnmaskData pData, pMaskingKey
    
    return tMaskedData
 end __WebSocketMaskUnmaskData
-
-
-constant kWebSocketGUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 private function __WebSocketComputeAccept pKey
    local tConcatenatedKey, tSha1Hash, tBase64EncodedHash
