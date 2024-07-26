@@ -16,6 +16,9 @@ constant kWebSocketGUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 constant kDefaultPort = 8080
 constant kDefaultServerName = "LiveCode WebSocket Server"
 
+// *******************************************************************************
+// SERVER SIDE
+// *******************************************************************************
 command websocketStart pCallback, pPort, pServerName
    local tPort, tServerName, tError
    
@@ -1043,3 +1046,74 @@ command logError pError
       put "ERROR:" && pError & return after field "Log"
    end if
 end logError
+
+
+// *******************************************************************************
+// CLIENT SIDE
+// *******************************************************************************
+
+
+command websocketConnect pURL
+   // VALIDATE THE URL
+   // PARSE THE URL TO EXTRACT HOST, PORT, PATH, AND PROTOCOL (WS OR WSS)
+   // CREATE A SOCKET CONNECTION (SECURE IF WSS)
+   // SEND HTTP UPGRADE REQUEST
+   // PROCESS SERVER RESPONSE
+   // VERIFY WEBSOCKET HANDSHAKE
+   // IF SUCCESSFUL, SET CONNECTION STATE TO OPEN
+   // TRIGGER websocketHandleOpen CALLBACK
+   // START LISTENING FOR INCOMING MESSAGES
+end websocketConnect
+
+command websocketDisconnect pSocketID
+   // CHECK IF THE CONNECTION IS OPEN
+   // SEND A WEBSOCKET CLOSE FRAME
+   // WAIT FOR CLOSE FRAME RESPONSE OR TIMEOUT
+   // CLOSE THE SOCKET
+   // SET CONNECTION STATE TO CLOSED
+   // TRIGGER websocketHandleClose CALLBACK
+end websocketDisconnect
+
+command websocketSend pSocketID, pMessage, pType
+   // VALIDATE THE SOCKET ID AND MESSAGE
+   // DETERMINE THE OPCODE BASED ON PTYPE (TEXT OR BINARY)
+   // CREATE A WEBSOCKET FRAME
+   // SEND THE FRAME OVER THE SOCKET
+end websocketSend
+
+function websocketIsConnected pSocketID
+   // CHECK IF THE SOCKET EXISTS AND IS OPEN
+   // RETURN TRUE IF CONNECTED, FALSE OTHERWISE
+end websocketIsConnected
+
+on websocketHandleOpen pSocketID
+   // THIS IS A CALLBACK HANDLER TO BE IMPLEMENTED BY THE USER
+   // IT WILL BE CALLED WHEN A CONNECTION IS SUCCESSFULLY ESTABLISHED
+end websocketHandleOpen
+
+on websocketHandleMessage pSocketID, pMessage, pType
+   // THIS IS A CALLBACK HANDLER TO BE IMPLEMENTED BY THE USER
+   // IT WILL BE CALLED WHEN A MESSAGE IS RECEIVED
+   // PTYPE WILL INDICATE IF THE MESSAGE IS TEXT OR BINARY
+end websocketHandleMessage
+
+on websocketHandleError pSocketID, pError
+   // THIS IS A CALLBACK HANDLER TO BE IMPLEMENTED BY THE USER
+   // IT WILL BE CALLED WHEN AN ERROR OCCURS
+end websocketHandleError
+
+on websocketHandleClose pSocketID, pStatusCode, pReason
+   // THIS IS A CALLBACK HANDLER TO BE IMPLEMENTED BY THE USER
+   // IT WILL BE CALLED WHEN THE CONNECTION IS CLOSED
+   // PSTATUSCODE AND PREASON WILL PROVIDE INFORMATION ABOUT WHY THE CONNECTION WAS CLOSED
+end websocketHandleClose
+
+private command __WebSocketReceive pSocketID, pData
+   // THIS IS AN INTERNAL HANDLER
+   // BUFFER INCOMING DATA
+   // PARSE COMPLETE WEBSOCKET FRAMES FROM THE BUFFER
+   // FOR EACH COMPLETE FRAME:
+   //   IF IT'S A CONTROL FRAME (CLOSE, PING, PONG), HANDLE IT ACCORDINGLY
+   //   IF IT'S A DATA FRAME (TEXT OR BINARY), TRIGGER websocketHandleMessage CALLBACK
+   // HANDLE ANY ERRORS AND TRIGGER websocketHandleError IF NECESSARY
+end __WebSocketReceive
