@@ -1053,67 +1053,571 @@ end logError
 // *******************************************************************************
 
 
+
 command websocketConnect pURL
+   local tError, tProtocol, tHost, tPort, tPath, tSecure,tURLParts
+   local tSocketID, tKey, tHandshake, tResponse
+   
    // VALIDATE THE URL
+   if pURL is empty then
+      put "Invalid WebSocket URL" into tError
+      return tError for error
+   end if
+   
    // PARSE THE URL TO EXTRACT HOST, PORT, PATH, AND PROTOCOL (WS OR WSS)
+   put urlParse(pURL) into tURLParts
+   put tURLParts["scheme"] into tProtocol
+   put tURLParts["host"] into tHost
+   put tURLParts["port"] into tPort
+   put tURLParts["path"] into tPath
+   
+   if tProtocol is not among the items of "ws,wss" then
+      put "Invalid WebSocket protocol" into tError
+      return tError for error
+   end if
+   
+   put (tProtocol is "wss") into tSecure
+   
+   if tPort is empty then
+      if tSecure then
+         put "443" into tPort
+      else
+         put "80" into tPort
+      end if
+   end if
+   
+   if tPath is empty then
+      put "/" into tPath
+   end if
+   
    // CREATE A SOCKET CONNECTION (SECURE IF WSS)
+   if tSecure then
+      open secure socket to tHost & ":" & tPort with message "__WebSocketConnected"
+   else
+      open socket to tHost & ":" & tPort with message "__WebSocketConnected"
+   end if
+   put the result into tError
+   if tError is not empty then
+      return "Failed to open socket:" && tError for error
+   end if
+   put it into tSocketID
+   
+   // GENERATE WEBSOCKET KEY
+   put __WebSocketGenerateKey() into tKey
+   
    // SEND HTTP UPGRADE REQUEST
+   put "GET" && tPath && "HTTP/1.1" & CR after tHandshake
+   put "Host:" && tHost & ":" & tPort & CR after tHandshake
+   put "Upgrade: websocket" & CR after tHandshake
+   put "Connection: Upgrade" & CR after tHandshake
+   put "Sec-WebSocket-Key:" && tKey & CR after tHandshake
+   put "Sec-WebSocket-Version: 13" & CR after tHandshake
+   put CR after tHandshake
+   
+   write tHandshake to socket tSocketID
+   
    // PROCESS SERVER RESPONSE
-   // VERIFY WEBSOCKET HANDSHAKE
-   // IF SUCCESSFUL, SET CONNECTION STATE TO OPEN
-   // TRIGGER websocketHandleOpen CALLBACK
-   // START LISTENING FOR INCOMING MESSAGES
+   read from socket tSocketID until empty with message "__WebSocketHandshakeResponse"
+   
+   // STORE CONNECTION INFORMATION
+   put "CONNECTING" into sWebSocketConnections[tSocketID]["status"]
+   put tHost into sWebSocketConnections[tSocketID]["host"]
+   put tPort into sWebSocketConnections[tSocketID]["port"]
+   put tPath into sWebSocketConnections[tSocketID]["path"]
+   put tSecure into sWebSocketConnections[tSocketID]["secure"]
+   put tKey into sWebSocketConnections[tSocketID]["key"]
+   
+   return tSocketID
 end websocketConnect
 
-command websocketDisconnect pSocketID
-   // CHECK IF THE CONNECTION IS OPEN
-   // SEND A WEBSOCKET CLOSE FRAME
-   // WAIT FOR CLOSE FRAME RESPONSE OR TIMEOUT
+on __WebSocketConnected pSocketID
+   // CALLBACK FOR WHEN THE SOCKET CONNECTION IS ESTABLISHED
+   if sWebSocketConnections[pSocketID] is empty then
+      // HANDLE UNEXPECTED CONNECTION
+      close socket pSocketID
+      exit __WebSocketConnected
+   end if
+   
+   // LOG CONNECTION
+   put "WebSocket connection established for socket" && pSocketID after msg
+end __WebSocketConnected
+
+on __WebSocketHandshakeResponse pSocketID, pData
+   local tResponse, tError
+   
+   put pData into tResponse
+   
+   // VERIFY WEBSOCKET HANDSHAKE
+   if __WebSocketVerifyHandshake(tResponse, sWebSocketConnections[pSocketID]["key"]) is false then
+      put "Invalid server handshake response" into tError
+      __WebSocketHandleError pSocketID, tError
+      exit __WebSocketHandshakeResponse
+   end if
+   
+   // SET CONNECTION STATE TO OPEN
+   put "OPEN" into sWebSocketConnections[pSocketID]["status"]
+   
+   // TRIGGER websocketHandleOpen CALLBACK
+   dispatch "websocketHandleOpen" to me with pSocketID
+   
+   // START LISTENING FOR INCOMING MESSAGES
+   read from socket pSocketID with message "__WebSocketReceive"
+end __WebSocketHandshakeResponse
+
+private function __WebSocketGenerateKey
+   local tRandomBytes, tEncodedKey
+   put urandom(16) into tRandomBytes
+   put base64Encode(tRandomBytes) into tEncodedKey
+   return tEncodedKey
+end __WebSocketGenerateKey
+
+private function __WebSocketVerifyHandshake pResponse, pKey
+   local tLines, tAccept, tExpectedAccept
+   
+   set the itemDelimiter to ":"
+   split pResponse by CR and LF
+   
+   if item 1 of line 1 of pResponse is not "HTTP/1.1 101" then return false
+   if pResponse["Upgrade"] is not "websocket" then return false
+   if pResponse["Connection"] contains not "Upgrade" then return false
+   
+   put pResponse["Sec-WebSocket-Accept"] into tAccept
+   put __WebSocketComputeAccept(pKey) into tExpectedAccept
+   
+   return (tAccept is tExpectedAccept)
+end __WebSocketVerifyHandshake
+
+private function __WebSocketComputeAccept pKey
+   local tConcatenatedKey, tSha1Hash, tBase64EncodedHash
+   put pKey & kWebSocketGUID into tConcatenatedKey
+   put sha1Digest(tConcatenatedKey) into tSha1Hash
+   put base64Encode(tSha1Hash) into tBase64EncodedHash
+   return tBase64EncodedHash
+end __WebSocketComputeAccept
+
+command __WebSocketHandleError pSocketID, pError
    // CLOSE THE SOCKET
-   // SET CONNECTION STATE TO CLOSED
+   close socket pSocketID
+   
+   // REMOVE CONNECTION DATA
+   delete variable sWebSocketConnections[pSocketID]
+   
+   // TRIGGER ERROR CALLBACK
+   dispatch "websocketHandleError" to me with pSocketID, pError
+end __WebSocketHandleError
+
+command websocketDisconnect pSocketID
+   local tError, tCloseFrame, tTimeoutTime
+   
+   // CHECK IF THE CONNECTION IS OPEN
+   if sWebSocketConnections[pSocketID]["status"] is not "OPEN" then
+      put "WebSocket connection is not open" into tError
+      return tError for error
+   end if
+   
+   // SEND A WEBSOCKET CLOSE FRAME
+   put __WebSocketCreateFrame(numToChar(1000 div 256) & numToChar(1000 mod 256) & "Normal Closure", 8, true) into tCloseFrame
+   write tCloseFrame to socket pSocketID
+   if the result is not empty then
+      put "Error sending close frame:" && the result into tError
+      return tError for error
+   end if
+   
+   // SET CONNECTION STATE TO CLOSING
+   put "CLOSING" into sWebSocketConnections[pSocketID]["status"]
+   
+   // WAIT FOR CLOSE FRAME RESPONSE OR TIMEOUT
+   put the milliseconds + 5000 into tTimeoutTime
+   repeat until the milliseconds > tTimeoutTime
+      if sWebSocketConnections[pSocketID]["status"] is "CLOSED" then
+         exit repeat
+      end if
+      wait 50 milliseconds with messages
+   end repeat
+   
+   // CLOSE THE SOCKET
+   close socket pSocketID
+   if the result is not empty then
+      put "Error closing socket:" && the result into tError
+      return tError for error
+   end if
+   
+   // SET CONNECTION STATE TO CLOSED IF NOT ALREADY
+   if sWebSocketConnections[pSocketID]["status"] is not "CLOSED" then
+      put "CLOSED" into sWebSocketConnections[pSocketID]["status"]
+   end if
+   
    // TRIGGER websocketHandleClose CALLBACK
+   dispatch "websocketHandleClose" to me with pSocketID, 1000, "Normal Closure"
+   
+   // REMOVE CONNECTION DATA
+   delete variable sWebSocketConnections[pSocketID]
+   
+   return empty
 end websocketDisconnect
 
 command websocketSend pSocketID, pMessage, pType
+   local tError, tOpcode, tFrame
+   
    // VALIDATE THE SOCKET ID AND MESSAGE
+   if pSocketID is empty or sWebSocketConnections[pSocketID] is empty then
+      put "Invalid socket ID" into tError
+      return tError for error
+   end if
+   
+   if sWebSocketConnections[pSocketID]["status"] is not "OPEN" then
+      put "WebSocket connection is not open" into tError
+      return tError for error
+   end if
+   
+   if pMessage is empty then
+      put "Message cannot be empty" into tError
+      return tError for error
+   end if
+   
    // DETERMINE THE OPCODE BASED ON PTYPE (TEXT OR BINARY)
+   switch pType
+      case "text"
+         put 1 into tOpcode
+         break
+      case "binary"
+         put 2 into tOpcode
+         break
+      default
+         put "Invalid message type. Must be 'text' or 'binary'." into tError
+         return tError for error
+   end switch
+   
    // CREATE A WEBSOCKET FRAME
+   put __WebSocketCreateFrame(pMessage, tOpcode, true) into tFrame
+   if tFrame is empty then
+      put "Failed to create WebSocket frame" into tError
+      return tError for error
+   end if
+   
    // SEND THE FRAME OVER THE SOCKET
+   write tFrame to socket pSocketID
+   put the result into tError
+   if tError is not empty then
+      return "Failed to send WebSocket frame:" && tError for error
+   end if
+   
+   // UPDATE LAST ACTIVITY TIMESTAMP
+   put the milliseconds into sWebSocketConnections[pSocketID]["lastActivity"]
+   
+   return empty
 end websocketSend
 
 function websocketIsConnected pSocketID
-   // CHECK IF THE SOCKET EXISTS AND IS OPEN
+   local tIsConnected, tSocketStatus
+   
+   // INITIALIZE THE RETURN VALUE TO FALSE
+   put false into tIsConnected
+   
+   // CHECK IF THE SOCKET ID IS VALID
+   if pSocketID is not empty then
+      // CHECK IF THE SOCKET EXISTS IN OUR CONNECTIONS ARRAY
+      if sWebSocketConnections[pSocketID] is not empty then
+         // GET THE CURRENT STATUS OF THE SOCKET
+         put sWebSocketConnections[pSocketID]["status"] into tSocketStatus
+         
+         // CHECK IF THE SOCKET STATUS IS "OPEN"
+         if tSocketStatus is "OPEN" then
+            // VERIFY THE SOCKET IS ACTUALLY OPEN
+            if the socket of pSocketID is not empty then
+               put true into tIsConnected
+            end if
+         end if
+      end if
+   end if
+   
    // RETURN TRUE IF CONNECTED, FALSE OTHERWISE
+   return tIsConnected
 end websocketIsConnected
 
 on websocketHandleOpen pSocketID
-   // THIS IS A CALLBACK HANDLER TO BE IMPLEMENTED BY THE USER
-   // IT WILL BE CALLED WHEN A CONNECTION IS SUCCESSFULLY ESTABLISHED
+   local tPort, tCallback, tTarget, tError
+   
+   // VALIDATE THE SOCKET ID
+   if pSocketID is empty or sWebSocketConnections[pSocketID] is empty then
+      put "Invalid socket ID or connection not found" into tError
+      logError tError
+      exit websocketHandleOpen
+   end if
+   
+   // GET THE PORT FOR THIS CONNECTION
+   put sWebSocketConnections[pSocketID]["port"] into tPort
+   
+   // ENSURE THE SERVER INFO EXISTS
+   if sWebSocketServers[tPort] is empty then
+      put "Server information not found for port" && tPort into tError
+      logError tError
+      exit websocketHandleOpen
+   end if
+   
+   // GET THE CALLBACK AND TARGET FOR THIS SERVER
+   put sWebSocketServers[tPort]["callback"] into tCallback
+   put sWebSocketServers[tPort]["target"] into tTarget
+   
+   // ENSURE THE CALLBACK AND TARGET ARE VALID
+   if tCallback is empty or tTarget is empty then
+      put "Invalid callback or target for port" && tPort into tError
+      logError tError
+      exit websocketHandleOpen
+   end if
+   
+   // DISPATCH THE OPEN EVENT TO THE APPLICATION
+   try
+      dispatch tCallback to tTarget with pSocketID, "OPEN"
+   catch tError
+      // LOG THE ERROR BUT CONTINUE PROCESSING
+      logError "Error dispatching WebSocket open event:" && tError
+   end try
+   
+   // UPDATE THE LAST ACTIVITY TIMESTAMP
+   put the milliseconds into sWebSocketConnections[pSocketID]["lastActivity"]
+   
+   // SET UP TIMEOUTS FOR THIS CONNECTION
+   __SetupTimeouts pSocketID
+   
+   // LOG SUCCESSFUL CONNECTION
+   logTheMessage "WebSocket connection opened for socket" && pSocketID
 end websocketHandleOpen
 
 on websocketHandleMessage pSocketID, pMessage, pType
-   // THIS IS A CALLBACK HANDLER TO BE IMPLEMENTED BY THE USER
-   // IT WILL BE CALLED WHEN A MESSAGE IS RECEIVED
-   // PTYPE WILL INDICATE IF THE MESSAGE IS TEXT OR BINARY
+   local tLogMessage
+   
+   // VALIDATE INPUT PARAMETERS
+   if pSocketID is empty then
+      put "Error: Invalid socket ID" into tLogMessage
+      logError tLogMessage
+      exit websocketHandleMessage
+   end if
+   
+   // LOG THE RECEIVED MESSAGE
+   put "WebSocket message received on socket" && pSocketID into tLogMessage
+   
+   // HANDLE DIFFERENT MESSAGE TYPES
+   switch pType
+      case 1
+         put " - Text message:" && pMessage after tLogMessage
+         // HANDLE TEXT MESSAGE
+         // ADD YOUR CUSTOM LOGIC HERE FOR TEXT MESSAGES
+         break
+      case 2
+         put " - Binary message, length:" && the length of pMessage after tLogMessage
+         // HANDLE BINARY MESSAGE
+         // ADD YOUR CUSTOM LOGIC HERE FOR BINARY MESSAGES
+         break
+      default
+         put " - Unknown message type:" && pType after tLogMessage
+         // HANDLE UNKNOWN TYPE
+         // ADD YOUR CUSTOM LOGIC HERE FOR UNKNOWN MESSAGE TYPES
+   end switch
+   
+   // LOG THE MESSAGE DETAILS
+   logTheMessage tLogMessage
+   
+   // UPDATE LAST ACTIVITY TIMESTAMP FOR THE CONNECTION
+   if sWebSocketConnections[pSocketID] is not empty then
+      put the milliseconds into sWebSocketConnections[pSocketID]["lastActivity"]
+   end if
+   
+   // OPTIONAL: TRIGGER ANY CUSTOM APPLICATION LOGIC
+   // YOU CAN ADD YOUR OWN CODE HERE TO HANDLE THE MESSAGE
+   // BASED ON YOUR APPLICATION'S NEEDS
 end websocketHandleMessage
 
 on websocketHandleError pSocketID, pError
-   // THIS IS A CALLBACK HANDLER TO BE IMPLEMENTED BY THE USER
-   // IT WILL BE CALLED WHEN AN ERROR OCCURS
+   local tPort, tCallback, tTarget, tLogMessage
+   
+   // VALIDATE INPUT PARAMETERS
+   if pSocketID is empty then
+      put "Error: Invalid socket ID" into tLogMessage
+      logError tLogMessage
+      exit websocketHandleError
+   end if
+   
+   // LOG THE ERROR
+   put "WebSocket error on socket" && pSocketID & ":" && pError into tLogMessage
+   logError tLogMessage
+   
+   // GET THE PORT FOR THIS CONNECTION
+   put sWebSocketConnections[pSocketID]["port"] into tPort
+   
+   // ENSURE THE SERVER INFO EXISTS
+   if sWebSocketServers[tPort] is empty then
+      put "Server information not found for port" && tPort into tLogMessage
+      logError tLogMessage
+      exit websocketHandleError
+   end if
+   
+   // GET THE CALLBACK AND TARGET FOR THIS SERVER
+   put sWebSocketServers[tPort]["callback"] into tCallback
+   put sWebSocketServers[tPort]["target"] into tTarget
+   
+   // ENSURE THE CALLBACK AND TARGET ARE VALID
+   if tCallback is empty or tTarget is empty then
+      put "Invalid callback or target for port" && tPort into tLogMessage
+      logError tLogMessage
+      exit websocketHandleError
+   end if
+   
+   // DISPATCH THE ERROR EVENT TO THE APPLICATION
+   try
+      dispatch tCallback to tTarget with pSocketID, "ERROR", pError
+   catch tError
+      put "Error dispatching WebSocket error event:" && tError into tLogMessage
+      logError tLogMessage
+   end try
+   
+   // CLOSE THE CONNECTION IF IT'S STILL OPEN
+   if sWebSocketConnections[pSocketID] is not empty then
+      if sWebSocketConnections[pSocketID]["status"] is "OPEN" then
+         websocketClose pSocketID, 1006, "Abnormal Closure"
+      end if
+   end if
+   
+   // REMOVE THE CONNECTION DATA
+   delete variable sWebSocketConnections[pSocketID]
 end websocketHandleError
 
 on websocketHandleClose pSocketID, pStatusCode, pReason
-   // THIS IS A CALLBACK HANDLER TO BE IMPLEMENTED BY THE USER
-   // IT WILL BE CALLED WHEN THE CONNECTION IS CLOSED
-   // PSTATUSCODE AND PREASON WILL PROVIDE INFORMATION ABOUT WHY THE CONNECTION WAS CLOSED
+   local tPort, tCallback, tTarget, tLogMessage, tError
+   
+   // VALIDATE INPUT PARAMETERS
+   if pSocketID is empty then
+      put "Error: Invalid socket ID" into tLogMessage
+      logError tLogMessage
+      exit websocketHandleClose
+   end if
+   
+   // LOG THE CLOSURE
+   put "WebSocket connection closed on socket" && pSocketID && "with status code" && pStatusCode && "(" & pReason & ")" into tLogMessage
+   logTheMessage tLogMessage
+   
+   // GET THE PORT FOR THIS CONNECTION
+   if sWebSocketConnections[pSocketID] is not empty then
+      put sWebSocketConnections[pSocketID]["port"] into tPort
+   else
+      put "Connection data not found for socket" && pSocketID into tLogMessage
+      logError tLogMessage
+      exit websocketHandleClose
+   end if
+   
+   // ENSURE THE SERVER INFO EXISTS
+   if sWebSocketServers[tPort] is empty then
+      put "Server information not found for port" && tPort into tLogMessage
+      logError tLogMessage
+      exit websocketHandleClose
+   end if
+   
+   // GET THE CALLBACK AND TARGET FOR THIS SERVER
+   put sWebSocketServers[tPort]["callback"] into tCallback
+   put sWebSocketServers[tPort]["target"] into tTarget
+   
+   // ENSURE THE CALLBACK AND TARGET ARE VALID
+   if tCallback is empty or tTarget is empty then
+      put "Invalid callback or target for port" && tPort into tLogMessage
+      logError tLogMessage
+      exit websocketHandleClose
+   end if
+   
+   // DISPATCH THE CLOSE EVENT TO THE APPLICATION
+   try
+      dispatch tCallback to tTarget with pSocketID, "CLOSED", pStatusCode, pReason
+   catch tError
+      put "Error dispatching WebSocket close event:" && tError into tLogMessage
+      logError tLogMessage
+   end try
+   
+   // CLEAN UP THE CONNECTION DATA
+   delete variable sWebSocketConnections[pSocketID]
+   
+   // ENSURE THE SOCKET IS CLOSED
+   if the socket of pSocketID is not empty then
+      close socket pSocketID
+      if the result is not empty then
+         put "Error closing socket" && pSocketID & ":" && the result into tLogMessage
+         logError tLogMessage
+      end if
+   end if
 end websocketHandleClose
 
 private command __WebSocketReceive pSocketID, pData
-   // THIS IS AN INTERNAL HANDLER
+   local tBuffer, tFrame, tOpcode, tPayload, tFIN, tError
+   local tMasked, tMaskingKey, tUnmaskedPayload
+   
    // BUFFER INCOMING DATA
+   put pData after sWebSocketConnections[pSocketID]["buffer"]
+   
    // PARSE COMPLETE WEBSOCKET FRAMES FROM THE BUFFER
-   // FOR EACH COMPLETE FRAME:
-   //   IF IT'S A CONTROL FRAME (CLOSE, PING, PONG), HANDLE IT ACCORDINGLY
-   //   IF IT'S A DATA FRAME (TEXT OR BINARY), TRIGGER websocketHandleMessage CALLBACK
-   // HANDLE ANY ERRORS AND TRIGGER websocketHandleError IF NECESSARY
+   repeat while the length of sWebSocketConnections[pSocketID]["buffer"] > 0
+      put __WebSocketParseFrame(sWebSocketConnections[pSocketID]["buffer"]) into tFrame
+      if tFrame is empty then
+         // NOT ENOUGH DATA FOR A COMPLETE FRAME
+         exit repeat
+      end if
+      
+      // EXTRACT FRAME INFORMATION
+      put tFrame["opcode"] into tOpcode
+      put tFrame["payload"] into tPayload
+      put tFrame["FIN"] into tFIN
+      put tFrame["mask"] into tMasked
+      put tFrame["maskingKey"] into tMaskingKey
+      
+      // UNMASK THE PAYLOAD IF NECESSARY
+      if tMasked then
+         put __WebSocketMaskUnmaskData(tPayload, tMaskingKey) into tUnmaskedPayload
+      else
+         put tPayload into tUnmaskedPayload
+      end if
+      
+      // HANDLE THE FRAME BASED ON ITS OPCODE
+      switch tOpcode
+         case 0 // CONTINUATION FRAME
+            // APPEND TO FRAGMENTED MESSAGE
+            put tUnmaskedPayload after sWebSocketConnections[pSocketID]["fragmentedMessage"]
+            if tFIN then
+               // COMPLETE MESSAGE RECEIVED
+               dispatch "websocketHandleMessage" to me with pSocketID, sWebSocketConnections[pSocketID]["fragmentedMessage"], sWebSocketConnections[pSocketID]["fragmentedOpcode"]
+               put empty into sWebSocketConnections[pSocketID]["fragmentedMessage"]
+               put empty into sWebSocketConnections[pSocketID]["fragmentedOpcode"]
+            end if
+            break
+         case 1 // TEXT FRAME
+         case 2 // BINARY FRAME
+            if tFIN then
+               // COMPLETE MESSAGE IN A SINGLE FRAME
+               dispatch "websocketHandleMessage" to me with pSocketID, tUnmaskedPayload, tOpcode
+            else
+               // START OF A FRAGMENTED MESSAGE
+               put tUnmaskedPayload into sWebSocketConnections[pSocketID]["fragmentedMessage"]
+               put tOpcode into sWebSocketConnections[pSocketID]["fragmentedOpcode"]
+            end if
+            break
+         case 8 // CLOSE FRAME
+            __WebSocketHandleClose pSocketID, tUnmaskedPayload
+            break
+         case 9 // PING FRAME
+            __WebSocketHandlePing pSocketID, tUnmaskedPayload
+            break
+         case 10 // PONG FRAME
+            __WebSocketHandlePong pSocketID, tUnmaskedPayload
+            break
+         default
+            // UNKNOWN OPCODE
+            put "Unknown WebSocket opcode:" && tOpcode into tError
+            __WebSocketHandleError pSocketID, tError
+      end switch
+      
+      // REMOVE THE PROCESSED FRAME FROM THE BUFFER
+      delete char 1 to tFrame["length"] of sWebSocketConnections[pSocketID]["buffer"]
+   end repeat
+   
+   // UPDATE LAST ACTIVITY TIMESTAMP
+   put the milliseconds into sWebSocketConnections[pSocketID]["lastActivity"]
+   
+   // CONTINUE READING FROM THE SOCKET
+   read from socket pSocketID with message "__WebSocketReceive"
 end __WebSocketReceive
